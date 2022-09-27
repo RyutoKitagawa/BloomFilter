@@ -15,14 +15,13 @@
 #include <iostream>
 #include <vector>
 #include <algorithm>
+#include <cub/cub.cuh>
 
 #include "device_vector.cuh"
 
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
-inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
-{
-   if (code != cudaSuccess) 
-   {
+inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true) {
+   if (code != cudaSuccess) {
       fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
       if (abort) exit(code);
    }
@@ -43,8 +42,8 @@ namespace pibf {
 		return hash % size;
 	}
 
-	__host__ __device__ inline unsigned int hash(ValueType value) {
-		return (value * 0xDEADBEEF) >> 18;
+	__host__ __device__ inline unsigned int hash(ValueType value, size_t size) {
+		return ((value * 0xDEADBEEF) >> 18) % size;
 	}
 
 	template<typename T>
@@ -75,6 +74,20 @@ namespace pibf {
 		}
 	}
 
+	// NOTE: Can only peel with less than 278,000 values
+	__global__ void peel(TableType* table, size_t tableSize, ValueType* values, size_t valueSize, size_t r) {
+		const unsigned int peeledSize = 4;
+		unsigned int count = 0;
+		ValueType peeled[peeledSize] = {0xFFFFFFFF};
+
+		if (tableSize < BLOCKS * THREADS * peeledSize) return;
+
+		for (int i = threadIdx.x ; i < tableSize; i += blockDim.x * gridDim.x)
+			if (table[i].count == 1) peeled[counter++] = table[i].value;
+
+		__syncthreads();
+	}
+
 	class ParallelInvertableBloomFilter {
 	private:
 		size_t n, r, c;
@@ -90,22 +103,10 @@ namespace pibf {
 		}
 
 		void insert(std::vector<ValueType> values) {
-			// Copy values to device
 			DeviceVector<ValueType> d_values(values);
 
-			// Insert values
 			insertKernel<<<BLOCKS, THREADS>>>(d_table.data(), d_table.size(), d_values.data(), d_values.size(), r);
 			cudaDeviceSynchronize();
-		}
-
-		void removeDuplicates(std::vector<ValueType> values) {
-			// Copy values to device
-			DeviceVector<ValueType> d_values(values);
-
-			// Remove duplicates
-			printf("Removing duplicates...\n");
-			testRemoveDuplicates<<<BLOCKS, THREADS>>>(d_values.data(), d_values.size());
-			gpuErrchk(cudaDeviceSynchronize());
 		}
 
 		void peel() {
