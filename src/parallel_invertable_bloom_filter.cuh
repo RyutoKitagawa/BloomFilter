@@ -18,6 +18,17 @@
 
 #include "device_vector.cuh"
 
+#define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
+{
+   if (code != cudaSuccess) 
+   {
+      fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
+      if (abort) exit(code);
+   }
+}
+
+
 namespace pibf {
 	typedef unsigned int ValueType;
 
@@ -34,6 +45,14 @@ namespace pibf {
 
 	__host__ __device__ inline unsigned int hash(ValueType value) {
 		return (value * 0xDEADBEEF) >> 18;
+	}
+
+	template<typename T>
+	__device__ inline void printArray(T* array, size_t size) {
+		if (threadIdx.x + blockIdx.x == 0)
+			for (size_t i = 0; i < size; i++)
+				printf("%d ", array[i]);
+		if (threadIdx.x + blockIdx.x == 0) printf("\n");
 	}
 
 	__global__ void insertKernel(TableType* table, size_t tableSize, ValueType* values, unsigned int valueSize, size_t r) {
@@ -53,31 +72,6 @@ namespace pibf {
 				atomicSub(&table[index].count, 1);
 				atomicSub(&table[index].value, values[i]);
 			}
-		}
-	}
-
-	// NOTE: Expected number of duplicates should be relatively small (less than 200,000)
-	__device__ void removeDuplicates(ValueType* values, unsigned int valueSize) {
-		const unsigned int hashSize = 4096;
-		__shared__ ValueType hashtable[hashSize];
-
-		// Sets empty value for hash table to be 0xFFFFFFFF
-		for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < hashSize; i += blockDim.x * gridDim.x)
-			hashtable[i] = 0xFFFFFFFF;
-
-		for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < valueSize; i += blockDim.x * gridDim.x) {
-			unsigned int index = hash(values[i]);
-			while (hashtable[index] != 0xFFFFFFFF && hashtable[index] != values[i]) {
-				ValueType old = atmoicCAS(&(hashtable[index]), values[i], 0xFFFFFFFF);
-				if (old == values[i]) break;
-				index = (index < hashSize - 1) ? index + 1 : 0;
-			}
-		}
-
-		__syncthreads();
-
-		for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < hashSize; i += blockDim.x * gridDim.x) {
-			values[i] = hashtable[i]
 		}
 	}
 
@@ -102,6 +96,16 @@ namespace pibf {
 			// Insert values
 			insertKernel<<<BLOCKS, THREADS>>>(d_table.data(), d_table.size(), d_values.data(), d_values.size(), r);
 			cudaDeviceSynchronize();
+		}
+
+		void removeDuplicates(std::vector<ValueType> values) {
+			// Copy values to device
+			DeviceVector<ValueType> d_values(values);
+
+			// Remove duplicates
+			printf("Removing duplicates...\n");
+			testRemoveDuplicates<<<BLOCKS, THREADS>>>(d_values.data(), d_values.size());
+			gpuErrchk(cudaDeviceSynchronize());
 		}
 
 		void peel() {
